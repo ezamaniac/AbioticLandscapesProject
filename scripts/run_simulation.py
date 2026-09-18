@@ -15,6 +15,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--landscape", required=True, help="Input .npy landscape")
     parser.add_argument("--generations", type=int, default=100)
+    parser.add_argument("--carrying-capacity", type=int, default=3)
     parser.add_argument("--seed", type=int, default=7, help="Random seed (default: 7)")
     parser.add_argument("--output", type=Path, help="Output .npy file; existing files are not overwritten")
     parser.add_argument(
@@ -29,6 +30,8 @@ def main():
     args = parser.parse_args()
     if args.generations < 0:
         parser.error("--generations must be nonnegative")
+    if args.carrying_capacity < 0:
+        parser.error("--carrying-capacity must be nonnegative")
 
     output = args.output or Path("data/simulations") / (
         f"{Path(args.landscape).stem}_g{args.generations}_seed{args.seed}_{args.snapshot}.npy"
@@ -47,6 +50,7 @@ def main():
             landscape, steps=args.generations, seed=args.seed,
             dispersal_mode=args.dispersal_mode,
             interspecific_strength=args.interspecific_strength,
+            carrying_capacity=args.carrying_capacity,
         )
         plants = getattr(result, args.snapshot)
         output.parent.mkdir(parents=True, exist_ok=True)

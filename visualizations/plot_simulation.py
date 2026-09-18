@@ -4,7 +4,8 @@ import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from matplotlib.colors import BoundaryNorm
+from matplotlib.colors import BoundaryNorm, ListedColormap
+from matplotlib.patches import Patch
 import numpy as np
 
 
@@ -64,8 +65,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("snapshot", help="Final adults or community .npy file")
     parser.add_argument("--output", help="Save the figure (e.g. .png) instead of opening a window")
+    parser.add_argument("--view", choices=("panels", "individuals", "dominant"), default="panels")
     args = parser.parse_args()
-    figure = plot_snapshot(args.snapshot)
+    figure = plot_snapshot(args.snapshot) if args.view == "panels" else plot_species_map(args.snapshot, args.view)
     if args.output:
         output = project_path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -74,6 +76,65 @@ def main():
         print(f"Saved figure to {output}")
     else:
         plt.show()
+
+
+def plot_species_map(path, view="individuals"):
+    """Plot all species together, using consistent colors in both views.
+
+    Individual offsets are display positions within each cell, not simulated
+    subcell coordinates. Dominance is the largest count; ties are marked gray.
+    """
+    counts = np.load(project_path(path), allow_pickle=False)
+    if counts.ndim != 3 or any(size == 0 for size in counts.shape):
+        raise ValueError("snapshot must have shape (species, rows, columns)")
+    if not np.issubdtype(counts.dtype, np.integer) or np.any(counts < 0):
+        raise ValueError("snapshot must contain nonnegative integer counts")
+    species_count, rows, cols = counts.shape
+    colors = [plt.get_cmap("tab10")(i % 10) for i in range(species_count)]
+    total = counts.sum(axis=0)
+    fig, ax = plt.subplots(figsize=(10, 9), constrained_layout=True)
+    legend = [Patch(color=color, label=f"Species {i + 1} ({counts[i].sum():,} plants)")
+              for i, color in enumerate(colors)]
+    if view == "individuals":
+        # Allocate a distinct position for every plant, including conspecifics.
+        slots = max(1, int(total.max()))
+        side = int(np.ceil(np.sqrt(slots)))
+        offset = (np.arange(side) + 0.5) / side - 0.5
+        occupied = np.zeros((rows, cols), dtype=int)
+        for species, color in enumerate(colors):
+            xs, ys = [], []
+            for plant in range(int(counts[species].max())):
+                r, c = np.nonzero(counts[species] > plant)
+                slot = occupied[r, c]
+                xs.extend(c + offset[slot % side] * 0.8)
+                ys.extend(r + offset[slot // side] * 0.8)
+                occupied[r, c] += 1
+            ax.scatter(xs, ys, color=color, s=max(2, min(24, (440 / max(rows, cols) / side)**2)),
+                       linewidths=0, rasterized=True)
+        title = "All plants · one dot per individual"
+        note = "Offsets within microsites are for display only. White = empty space."
+    elif view == "dominant":
+        maximum = counts.max(axis=0)
+        tied = ((counts == maximum).sum(axis=0) > 1) & (total > 0)
+        labels = counts.argmax(axis=0) + 1
+        labels[total == 0] = 0
+        labels[tied] = species_count + 1
+        cmap = ListedColormap(["white", *colors, "#777777"])
+        ax.imshow(labels, origin="lower", interpolation="nearest", cmap=cmap,
+                  norm=BoundaryNorm(np.arange(-0.5, species_count + 2.5), cmap.N))
+        legend += [Patch(color="white", ec="#aaaaaa", label="Empty"),
+                   Patch(color="#777777", label="Tied highest counts")]
+        title = "Dominant species at each microsite"
+        note = "Dominance uses plant counts; less abundant coexisting species are not shown."
+    else:
+        raise ValueError("view must be individuals or dominant")
+    ax.set(xlim=(-0.5, cols - 0.5), ylim=(-0.5, rows - 0.5),
+           xlabel="Column (x)", ylabel="Row (y)", title=title)
+    ax.set_aspect("equal")
+    ax.legend(handles=legend, loc="upper left", bbox_to_anchor=(1.01, 1), frameon=False)
+    fig.suptitle(Path(path).name, fontsize=11)
+    fig.supxlabel(note, fontsize=9)
+    return fig
 
 
 if __name__ == "__main__":

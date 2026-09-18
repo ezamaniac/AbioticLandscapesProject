@@ -1,11 +1,13 @@
 """Check V1 equations against small, independently calculated examples."""
 
 import unittest
+from itertools import product
 from unittest.mock import patch
 
 import numpy as np
 
 from scripts.simulationV1 import (
+    stage_performance,
     competition_pressure,
     expected_seed_production,
     gaussian_performance,
@@ -134,7 +136,7 @@ class SimulationEquationTests(unittest.TestCase):
         self.assertTrue(np.all(first.adults.sum(axis=0) <= 3))
         self.assertEqual(first.adults[0].sum(), 0)
         self.assertGreater(first.seeds[0].sum(), 0)
-        self.assertEqual(set(vars(first)), {"adults", "seeds", "community"})
+        self.assertEqual(set(vars(first)), {"adults", "seeds", "community", "metadata"})
         for name in ("adults", "seeds", "community"):
             np.testing.assert_array_equal(getattr(first, name), getattr(second, name))
 
@@ -198,8 +200,8 @@ class SimulationEquationTests(unittest.TestCase):
         np.testing.assert_array_equal(initial.adults, initial.community)
         self.assertEqual(initial.seeds.sum(), 0)
         np.testing.assert_array_equal(first.community, initial.community)
-        self.assertGreater(first.community[:2].sum(), 0)
-        self.assertEqual(first.adults[:2].sum(), 0)
+        self.assertGreater(first.community[[0, 2]].sum(), 0)
+        self.assertEqual(first.adults[[0, 2]].sum(), 0)
         self.assertTrue(np.all(first.adults <= first.community))
         for result in (initial, first):
             self.assertFalse(np.shares_memory(result.adults, result.community))
@@ -209,10 +211,10 @@ class SimulationEquationTests(unittest.TestCase):
         landscape = np.arange(25).reshape(5, 5) / 6 - 2
         # min=-2, max=2; inset=range/4=1 -> optima -1 to +1.
         expected = run_simulation(landscape, 2, optima=np.linspace(-1, 1, 4),
-            annual=[True, True, False, False], niche_widths=np.sqrt(2), h=1,
-            fecundity=[20, 20, 5, 5], alpha=np.ones((4, 4)), m=4, seed=2)
+            annual=[True, False, True, False], niche_widths=np.sqrt(2), h=1,
+            fecundity=[20, 5, 20, 5], alpha=np.ones((4, 4)), m=4, seed=2)
         actual = run_simulation(landscape, 2, seed=2)
-        for name in vars(actual):
+        for name in ("adults", "seeds", "community"):
             np.testing.assert_array_equal(getattr(actual, name), getattr(expected, name))
         for strength in (0.5, 1, 1.5):
             matrix = np.full((4, 4), strength, dtype=float)
@@ -222,6 +224,67 @@ class SimulationEquationTests(unittest.TestCase):
             np.testing.assert_array_equal(a.community, b.community)
         performance = gaussian_performance(np.array([[np.sqrt(2)]]), [0])
         np.testing.assert_allclose(performance, np.exp(-0.5))
+
+    def test_total_abundance_multiplier_and_single_alpha(self):
+        total = np.array([[[5]], [[3]]])
+        eligible = np.array([[[1]], [[2]]])
+        # 5*(1*5 + 2*0.5*3)=40; 3*(1*3 + 4*0.25*5)=24.
+        weights = competition_pressure(total, np.array([[[0.25]], [[0.5]]]),
+                                       [[1, 2], [4, 1]], eligible=eligible)
+        np.testing.assert_array_equal(weights, [[[40]], [[24]]])
+        adults = total - eligible
+        survivors = competition_phase(eligible, np.ones_like(total), [[1, 2], [4, 1]],
+                                      carrying_capacity=6, adults=adults, seed=3)
+        self.assertEqual((adults + survivors).sum(), 6)
+        self.assertTrue(np.all(survivors >= 0))
+        np.testing.assert_array_equal(adults, total - eligible)
+
+    def test_spatial_baselines_and_stage_overrides(self):
+        landscape = np.array([[0., 0.], [0., 4.]])
+        local = gaussian_performance(landscape, [0, 4], [1, 2])
+        selected, meta = stage_performance(landscape, [0, 4], [1, 2], False)
+        np.testing.assert_allclose(selected, np.broadcast_to(local.mean(axis=(1, 2))[:, None, None], local.shape))
+        np.testing.assert_allclose(meta['baseline'], local.mean(axis=(1, 2)))
+        self.assertNotAlmostEqual(meta['baseline'][0], meta['baseline'][1])
+        settings = dict(optima=[0, 4], annual=[True, False],
+                        competition_optima=[4, 0], competition_widths=[2, 1])
+        a = run_simulation(landscape, 0, seed=1, **settings)
+        b = run_simulation(landscape, 0, seed=42, **settings)
+        for stage in ('germination', 'competition', 'reproduction'):
+            np.testing.assert_array_equal(a.metadata[stage]['baseline'], b.metadata[stage]['baseline'])
+        np.testing.assert_array_equal(a.metadata['annual'], [True, False])
+        np.testing.assert_array_equal(a.metadata['competition']['optima'], [4, 0])
+        np.testing.assert_array_equal(a.metadata['competition']['niche_widths'], [2, 1])
+        np.testing.assert_array_equal(a.metadata['germination']['optima'], [0, 4])
+        np.testing.assert_array_equal(a.metadata['reproduction']['optima'], [0, 4])
+        with self.assertRaises(ValueError):
+            run_simulation(landscape, 0, optima=[0, 4], competition_optima=[0])
+        with self.assertRaises(ValueError):
+            run_simulation(landscape, 0, competition_widths=[1, 2, 3])
+
+    def test_all_stage_combinations_reproducible_and_used(self):
+        landscape = np.arange(25).reshape(5, 5) / 6 - 2
+        for g, c, r in product((False, True), repeat=3):
+            settings = dict(abiotic_germination=g, abiotic_competition=c,
+                            abiotic_reproduction=r, seed=7)
+            with patch('scripts.simulationV1.germination_phase', wraps=germination_phase) as gp, \
+                 patch('scripts.simulationV1.competition_phase', wraps=competition_phase) as cp, \
+                 patch('scripts.simulationV1.reproduction_phase', wraps=reproduction_phase) as rp:
+                a = run_simulation(landscape, 3, **settings)
+                for stage, enabled, phase in (('germination', g, gp), ('competition', c, cp), ('reproduction', r, rp)):
+                    meta = a.metadata[stage]
+                    expected = gaussian_performance(landscape, meta['optima'], meta['niche_widths'])
+                    if not enabled:
+                        expected = np.broadcast_to(expected.mean(axis=(1, 2))[:, None, None], expected.shape)
+                    for call in phase.call_args_list:
+                        np.testing.assert_allclose(call.args[1], expected)
+            b = run_simulation(landscape, 3, **settings)
+            for name in ('adults', 'seeds', 'community'):
+                np.testing.assert_array_equal(getattr(a, name), getattr(b, name))
+                self.assertTrue(np.all(getattr(a, name) >= 0))
+            self.assertTrue(np.all(a.community.sum(axis=0) <= 3))
+            self.assertTrue(np.all(a.adults <= a.community))
+            self.assertEqual(a.adults[[0, 2]].sum(), 0)
 
 
 if __name__ == "__main__":
