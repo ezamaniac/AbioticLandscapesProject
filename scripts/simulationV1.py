@@ -2,8 +2,8 @@
 
 Lifecycle: random initialization, initial competition to carrying capacity, then
 repeated germination, competition, reproduction, and dispersal phases.
-Competition removes individuals until carrying capacity is met, with species
-death-event rates given by r_j. Reproduction uses Poisson seed counts.
+Competition protects established adults and uses fixed seedling removal weights.
+Reproduction samples each individual's fractional seed independently.
 For V1, use the same landscape as the abiotic input for G, C, and R.
 """
 
@@ -40,10 +40,9 @@ def _validate_landscape(landscape):
 def initialize_densities(landscape, number_of_species=4, seed=None):
     """Return integer plant counts with shape (species, rows, columns).
 
-    Place one landscape's worth of individuals uniformly at random, allowing
-    multiple individuals at a microsite. Each species receives approximately
-    landscape.size / number_of_species individuals. Randomly selected species
-    receive any remainder, keeping the total equal to the number of sites.
+    Place round(landscape.size / number_of_species) individuals per species
+    uniformly at random, allowing multiple individuals at a microsite.
+    No remainder is distributed (65 x 65 with four species gives 1,056 each).
     A seed or an existing NumPy Generator may be supplied for reproducibility.
     """
     landscape = np.asarray(landscape)
@@ -57,10 +56,7 @@ def initialize_densities(landscape, number_of_species=4, seed=None):
 
     rng = np.random.default_rng(seed)
     site_count = landscape.size
-    per_species, remainder = divmod(site_count, number_of_species)
-    totals = np.full(number_of_species, per_species, dtype=np.int64)
-    if remainder:
-        totals[rng.choice(number_of_species, size=remainder, replace=False)] += 1
+    totals = np.full(number_of_species, round(site_count / number_of_species), dtype=np.int64)
 
     densities = np.zeros((number_of_species, *landscape.shape), dtype=np.int64)
     for species, count in enumerate(totals):
@@ -101,11 +97,12 @@ def _validate_densities(densities, shape):
     return densities
 
 
-def gaussian_performance(landscape, optima, niche_widths):
+def gaussian_performance(landscape, optima, niche_widths=np.sqrt(2)):
     """Compute P_Xi = exp(-(X - mu_Xi)^2 / (2 sigma_Xi^2)).
 
     optima is a nonempty vector with one entry per species. niche_widths may
-    be a positive scalar or a vector with one entry per species. The result
+    be a positive scalar or a vector of standard deviations (not variances).
+    The default sqrt(2) corresponds to the paper's variance sigma^2 = 2. The result
     has shape (species, rows, columns). Call with the same landscape for G,
     C, and R; phase-specific optima and widths can still differ.
     """
@@ -136,14 +133,17 @@ def germination_probability(performance, h):
     return maximum * performance
 
 
-def competition_pressure(densities, performance, alpha, z):
-    """Evaluate r_j = n_j/z * (alpha_jj*n_j + sum_i!=j alpha_ji*P_Ci*n_i).
+def competition_pressure(densities, performance, alpha, eligible=None):
+    """Return unnormalized removal weights e_j*(alpha_jj*n_j + sum_i!=j alpha_ji*P_Ci*n_i).
 
     The species axis represents j in the output and i in competitor inputs.
     alpha[j, i] is the effect of competitor i on focal species j. The diagonal
-    term is NOT performance-weighted. Here n_j is supplied as species j's
-    density at each site; no conversion of r_j to deaths is imposed.
-    z must be a positive scalar. Pressures are not clipped to probabilities.
+    term is NOT performance-weighted. n is pre-competition adults + seedlings;
+    e is the eligible seedling count (defaults to n for initialization).
+    The paper describes both total pre-competition density and germinating
+    individuals without explicitly separating them in Eq. 2. We interpret the
+    outer count as eligible individuals and the bracket as effects of all plants.
+    Z is computed by competition_phase as the sum of eligible weights.
     """
     performance = _validate_performance(performance)
     densities = _validate_densities(densities, performance.shape)
@@ -153,15 +153,15 @@ def competition_pressure(densities, performance, alpha, z):
         raise ValueError("alpha must have shape (species, species)")
     if not np.isfinite(alpha).all() or np.any(alpha < 0):
         raise ValueError("competition strengths must be finite and nonnegative")
-    z = np.asarray(z, dtype=float)
-    if z.ndim != 0 or not np.isfinite(z) or z <= 0:
-        raise ValueError("z must be a finite positive scalar")
+    eligible = densities if eligible is None else _validate_densities(eligible, densities.shape)
+    if np.any(eligible > densities):
+        raise ValueError("eligible counts cannot exceed total densities")
 
     interspecific = alpha.copy()
     np.fill_diagonal(interspecific, 0.0)
     competitors = np.einsum("ji,ixy->jxy", interspecific, performance * densities)
     self_competition = np.diag(alpha)[:, None, None] * densities
-    return densities / z * (self_competition + competitors)
+    return eligible * (self_competition + competitors)
 
 
 def individual_fecundity(performance, fecundity):
@@ -207,32 +207,33 @@ def _nonnegative_integer(value, name):
         raise ValueError(f"{name} must be a nonnegative integer")
 
 
-def competition_phase(densities, performance, alpha, carrying_capacity=3, z=1.0, seed=None):
-    """Remove one plant per overcrowded site per round, recomputing r_j.
+def competition_phase(densities, performance, alpha, carrying_capacity=3, seed=None, *, adults=None):
+    """Return surviving eligible plants; the caller keeps protected adults separately.
 
-    Treat r_j as the total death-event rate for species j at a site. Conditional
-    on a death, its species is sampled with probability r_j / sum(r). Sites at
-    or below capacity have no competition deaths. This runs to capacity rather
-    than for a fixed duration, so a shared z changes no survival probabilities.
-    Zero total mortality at an overcrowded site raises an error.
+    densities contains seedlings, or all plants during initialization. Original
+    weights remain fixed; only species with remaining eligible plants enter
+    subsequent draws. Z is their weight sum. Adults occupy capacity and exert
+    pressure. Overcrowded sites with no positive eligible weight raise an error.
     """
     _nonnegative_integer(carrying_capacity, "carrying_capacity")
     counts = _counts(densities)
-    rates = competition_pressure(counts, performance, alpha, z)
+    adults = np.zeros_like(counts) if adults is None else _counts(adults)
+    if adults.shape != counts.shape or np.any(adults.sum(axis=0) > carrying_capacity):
+        raise ValueError("adults must match seedling shape and fit within capacity")
+    rates = competition_pressure(adults + counts, performance, alpha, eligible=counts)
     rng = np.random.default_rng(seed)
     while True:
-        rows, cols = np.nonzero(counts.sum(axis=0) > carrying_capacity)
+        rows, cols = np.nonzero((adults + counts).sum(axis=0) > carrying_capacity)
         if rows.size == 0:
             return counts
-        site_rates = rates[:, rows, cols]
+        site_rates = rates[:, rows, cols] * (counts[:, rows, cols] > 0)
         totals = site_rates.sum(axis=0)
         if not np.isfinite(totals).all() or np.any(totals <= 0):
             raise ValueError("overcrowded sites must have finite positive total mortality")
-        cumulative = np.cumsum(site_rates / totals, axis=0)
-        cumulative[-1] = 1.0
+        cumulative = np.cumsum(site_rates, axis=0)
+        cumulative /= cumulative[-1]
         deaths = (rng.random(rows.size)[None, :] >= cumulative).sum(axis=0)
         counts[deaths, rows, cols] -= 1
-        rates = competition_pressure(counts, performance, alpha, z)
 
 
 def germination_phase(seeds, performance, h, seed=None):
@@ -245,18 +246,21 @@ def germination_phase(seeds, performance, h, seed=None):
 
 
 def reproduction_phase(densities, performance, fecundity, seed=None):
-    """Sample Poisson seeds with mean n_j F_j P_Rj at each microsite."""
+    """Sample n*floor(f) + Binomial(n, f-floor(f)), where f = F*P_R."""
     counts = _counts(densities)
-    means = expected_seed_production(counts, performance, fecundity)
-    return np.random.default_rng(seed).poisson(means)
+    fecundity = individual_fecundity(performance, fecundity)
+    _validate_densities(counts, fecundity.shape)
+    whole = np.floor(fecundity).astype(np.int64)
+    return counts * whole + np.random.default_rng(seed).binomial(counts, fecundity - whole)
 
 
 def dispersal_phase(seeds, annual, mode="adjacent", p=0.5, seed=None):
     """Return (deposited seeds, lost seeds per species).
 
     Perennial radii are 1, 10, and the landscape dimension for adjacent,
-    intermediate, and universal dispersal. Annual radii are twice these.
-    Each seed disperses with probability p. Dispersers choose uniformly from
+    intermediate, and universal dispersal. Annual radii double only for adjacent
+    and intermediate dispersal. Each seed stays with probability p.
+    As an implementation assumption, dispersers choose uniformly from
     integer offsets in [-radius, radius]^2 excluding (0, 0); thus distance is
     measured by the maximum absolute row/column offset (diagonals included).
     Out-of-bounds destinations are lost, without wrapping or resampling.
@@ -272,12 +276,12 @@ def dispersal_phase(seeds, annual, mode="adjacent", p=0.5, seed=None):
     if not np.isscalar(p) or not np.isfinite(p) or not 0 <= p <= 1:
         raise ValueError("p must be between zero and one")
     rng = np.random.default_rng(seed)
-    moving = rng.binomial(seeds, p)
+    moving = rng.binomial(seeds, 1 - p)
     deposited = seeds - moving
     lost = np.zeros(seeds.shape[0], dtype=np.int64)
     dimension = seeds.shape[1]
     for species in range(seeds.shape[0]):
-        radius = radii[mode] * (2 if annual[species] else 1)
+        radius = radii[mode] * (2 if annual[species] and mode != "universal" else 1)
         width = 2 * radius + 1
         center = radius * width + radius
         for row, col in zip(*np.nonzero(moving[species])):
@@ -299,7 +303,7 @@ def dispersal_phase(seeds, annual, mode="adjacent", p=0.5, seed=None):
     return deposited, lost
 
 
-def adult_survival_phase(densities, annual, m=3.0, seed=None):
+def adult_survival_phase(densities, annual, m=4.0, seed=None):
     """Annuals die; each perennial independently survives with probability 1-1/m."""
     counts = _counts(densities)
     annual = _annual_flags(annual, counts.shape[0])
@@ -312,38 +316,76 @@ def adult_survival_phase(densities, annual, m=3.0, seed=None):
 
 @dataclass
 class SimulationResult:
-    """Final adults and seeds, each shaped (species, rows, columns).
+    """Final spatial arrays, each shaped (species, rows, columns).
 
-    Adults are recorded after end-of-year mortality; seeds are available for
-    the next step. No time history is retained.
+    community is an independent post-competition, pre-mortality snapshot.
+    adults are post-mortality survivors; seeds are dispersed offspring for the
+    next year. With zero steps, adults and community both hold the initialized
+    post-competition plants (independent arrays), and seeds are empty.
+    No time history or persistent seed bank is retained.
     """
 
     adults: np.ndarray
     seeds: np.ndarray
+    community: np.ndarray
 
 
 def run_simulation(
-    landscape, steps, *, optima, niche_widths, annual, h, fecundity, alpha,
-    carrying_capacity=3, z=1.0, dispersal_mode="adjacent", p=0.5, m=3.0,
-    retain_ungerminated=False, seed=None,
+    landscape, steps, *, optima=None, niche_widths=np.sqrt(2), annual=None,
+    h=1.0, fecundity=None, alpha=None, interspecific_strength=1.0,
+    number_of_species=4, carrying_capacity=3, dispersal_mode="adjacent",
+    p=0.5, m=4.0, seed=None,
 ):
     """Run initialization, initial competition, and the annual phase loop.
 
-    Species count is determined by optima. G=C=R=landscape, using shared optima
-    and widths for all three phases. Initial plants are reproductive adults;
-    the initial seed pool is empty. Each step germinates seeds, adds recruits
-    to surviving adults, competes to capacity, reproduces, and disperses new
-    seeds. Adult survival is applied after reproduction/dispersal. Ungerminated
-    seeds are discarded by default or retained unchanged when requested.
+    G=C=R=landscape. Default optima span min(A)+range(A)/S to max(A)-range(A)/S
+    evenly (the midpoint for S=1). Explicit optima determine species count;
+    otherwise annual flags determine it, or number_of_species is used.
+    The four-species baseline is two annuals followed by two perennials; other
+    species counts require explicit annual flags. Defaults are h=1, F=20/5 for
+    annuals/perennials, niche standard deviation sqrt(2), and m=4.
+    alpha defaults to diagonal 1 and symmetric interspecific_strength (0.5, 1,
+    or 1.5); a custom matrix overrides this shorthand.
+
+    First-year survivors of initial competition reproduce, disperse, then die
+    according to life history. Later years germinate last year's seeds, protect
+    established adults during competition, reproduce, disperse, and apply adult
+    mortality. Ungerminated seeds are discarded. Reproduction remains locally
+    abiotic-dependent. Only the final community, adults, and seeds are returned.
 
     h, fecundity, and niche_widths accept scalars or species vectors. alpha is
     a species-by-species matrix; annual is a boolean vector. The entire run
     shares one random generator for reproducibility.
     """
     _nonnegative_integer(steps, "steps")
+    landscape = np.asarray(landscape)
+    _validate_landscape(landscape)
+    species_count = len(optima) if optima is not None else (
+        len(annual) if annual is not None else number_of_species
+    )
+    _nonnegative_integer(species_count, "number_of_species")
+    if species_count == 0:
+        raise ValueError("number_of_species must be positive")
+    if optima is None:
+        low, high = float(landscape.min()), float(landscape.max())
+        margin = (high - low) / species_count
+        optima = (
+            np.linspace(low + margin, high - margin, species_count)
+            if species_count > 1 else [(low + high) / 2]
+        )
+    if annual is None:
+        if species_count != 4:
+            raise ValueError("provide annual flags for communities other than four species")
+        annual = [True, True, False, False]
     performance = gaussian_performance(landscape, optima, niche_widths)
-    species_count = performance.shape[0]
     annual = _annual_flags(annual, species_count)
+    if fecundity is None:
+        fecundity = np.where(annual, 20.0, 5.0)
+    if alpha is None:
+        if interspecific_strength not in (0.5, 1.0, 1.5):
+            raise ValueError("interspecific_strength must be 0.5, 1.0, or 1.5; use alpha for custom strengths")
+        alpha = np.full((species_count, species_count), interspecific_strength)
+        np.fill_diagonal(alpha, 1.0)
     # Validate phase parameters even for zero-step runs.
     germination_probability(performance, h)
     individual_fecundity(performance, fecundity)
@@ -352,14 +394,16 @@ def run_simulation(
     dispersal_phase(empty, annual, dispersal_mode, p, seed=0)
     rng = np.random.default_rng(seed)
     adults = initialize_densities(landscape, species_count, seed=rng)
-    adults = competition_phase(adults, performance, alpha, carrying_capacity, z, rng)
+    adults = competition_phase(adults, performance, alpha, carrying_capacity, seed=rng)
     seeds = empty
-    for _ in range(steps):
-        recruits, remaining = germination_phase(seeds, performance, h, rng)
-        adults = competition_phase(adults + recruits, performance, alpha, carrying_capacity, z, rng)
+    community = adults.copy()
+    for year in range(steps):
+        if year > 0:
+            recruits, _ = germination_phase(seeds, performance, h, rng)
+            recruits = competition_phase(recruits, performance, alpha, carrying_capacity, seed=rng, adults=adults)
+            adults = adults + recruits
+        community = adults.copy()
         produced = reproduction_phase(adults, performance, fecundity, rng)
         seeds, _ = dispersal_phase(produced, annual, dispersal_mode, p, rng)
-        if retain_ungerminated:
-            seeds += remaining
         adults = adult_survival_phase(adults, annual, m, rng)
-    return SimulationResult(adults, seeds)
+    return SimulationResult(adults, seeds, community)
