@@ -350,17 +350,20 @@ class SimulationResult:
 
 
 def run_simulation(
-    landscape, steps, *, optima=None, niche_widths=np.sqrt(2), annual=None,
+    landscape=None, steps=200, *, optima=None, niche_widths=np.sqrt(2), annual=None,
     h=1.0, fecundity=None, alpha=None, interspecific_strength=1.0,
     number_of_species=4, carrying_capacity=3, dispersal_mode="adjacent",
     p=0.5, m=4.0, seed=None,
     abiotic_germination=True, abiotic_competition=True, abiotic_reproduction=True,
     germination_optima=None, competition_optima=None, reproduction_optima=None,
     germination_widths=None, competition_widths=None, reproduction_widths=None,
+    germination_landscape=None, competition_landscape=None, reproduction_landscape=None,
 ):
     """Run initialization, initial competition, and the annual phase loop.
 
-    G=C=R=landscape. Default optima span min(A)+range(A)/S to max(A)-range(A)/S
+    Defaults to 200 years, matching Catella and Abbott (2023), Section 2.2.
+    Stage landscapes override the shared landscape. All must have equal shapes.
+    Default optima span min(A)+range(A)/S to max(A)-range(A)/S for each stage
     evenly (the midpoint for S=1). Explicit optima determine species count;
     otherwise annual flags determine it, or number_of_species is used.
     The four-species baseline is annual, perennial, annual, perennial; other
@@ -385,8 +388,18 @@ def run_simulation(
     shares one random generator for reproducibility.
     """
     _nonnegative_integer(steps, "steps")
-    landscape = np.asarray(landscape)
-    _validate_landscape(landscape)
+    landscapes = {}
+    for stage, supplied in (("germination", germination_landscape),
+                            ("competition", competition_landscape),
+                            ("reproduction", reproduction_landscape)):
+        resolved = landscape if supplied is None else supplied
+        if resolved is None:
+            raise ValueError(f"missing {stage} landscape: supply it or a shared landscape")
+        landscapes[stage] = np.asarray(resolved)
+        _validate_landscape(landscapes[stage])
+    if len({a.shape for a in landscapes.values()}) != 1:
+        raise ValueError("all stage landscapes must have the same spatial dimensions")
+    landscape = landscapes["germination"]  # Initialization needs only the grid shape.
     vectors = [v for v in (optima, annual, germination_optima, competition_optima,
                             reproduction_optima) if v is not None]
     species_count = len(vectors[0]) if vectors else number_of_species
@@ -395,13 +408,6 @@ def run_simulation(
     _nonnegative_integer(species_count, "number_of_species")
     if species_count == 0:
         raise ValueError("number_of_species must be positive")
-    if optima is None:
-        low, high = float(landscape.min()), float(landscape.max())
-        margin = (high - low) / species_count
-        optima = (
-            np.linspace(low + margin, high - margin, species_count)
-            if species_count > 1 else [(low + high) / 2]
-        )
     if annual is None:
         if species_count != 4:
             raise ValueError("provide annual flags for communities other than four species")
@@ -412,8 +418,14 @@ def run_simulation(
         ("competition", competition_optima, competition_widths, abiotic_competition),
         ("reproduction", reproduction_optima, reproduction_widths, abiotic_reproduction),
     ):
+        means = optima if means is None else means
+        if means is None:
+            low, high = float(landscapes[stage].min()), float(landscapes[stage].max())
+            margin = (high - low) / species_count
+            means = (np.linspace(low + margin, high - margin, species_count)
+                     if species_count > 1 else [(low + high) / 2])
         performances[stage], metadata[stage] = stage_performance(
-            landscape, optima if means is None else means,
+            landscapes[stage], means,
             niche_widths if widths is None else widths, enabled,
         )
     germination_map = performances["germination"]
@@ -428,6 +440,14 @@ def run_simulation(
             raise ValueError("interspecific_strength must be 0.5, 1.0, or 1.5; use alpha for custom strengths")
         alpha = np.full((species_count, species_count), interspecific_strength)
         np.fill_diagonal(alpha, 1.0)
+    metadata["demography"] = {
+        "h": _species_parameter(h, species_count, "h")[:, 0, 0].copy(),
+        "fecundity": _species_parameter(fecundity, species_count, "fecundity")[:, 0, 0].copy(),
+        "alpha": np.asarray(alpha).copy(),
+        "m": _species_parameter(m, species_count, "m")[:, 0, 0].copy(),
+        "p": p, "carrying_capacity": carrying_capacity, "dispersal_mode": dispersal_mode,
+        "species_order": list(range(species_count)),
+    }
     # Validate phase parameters even for zero-step runs.
     germination_probability(germination_map, h)
     individual_fecundity(reproduction_map, fecundity)

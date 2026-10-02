@@ -147,5 +147,93 @@ species count; explicit annual flags remain unchanged.
 
 Inspect `result.metadata["germination"]` (or `"competition"`, `"reproduction"`)
 for resolved `optima`, `niche_widths`, `baseline`, and `abiotic`. Annual flags are
-in `result.metadata["annual"]`. Metadata stays in memory; this change introduces
-no metadata export or time-series storage. All stages still use the same landscape.
+in `result.metadata["annual"]`. The Python function returns metadata in memory; the treatment batch runner below
+saves it separately from classifier inputs. No time-series storage is included.
+
+## Separate stage landscapes and saved treatment batches
+
+The current model is `scripts/simulationV1.py`. Pass `germination_landscape=G`,
+`competition_landscape=C`, and `reproduction_landscape=R` to `run_simulation`.
+Stage arrays override the shared `landscape` argument. Without a shared array,
+all three stage arrays are required. All resolved landscapes must be square and
+have identical dimensions. Default optima use each stage's own landscape range;
+explicit stage optima override shared optima. The existing lifecycle is unchanged.
+
+The single-run CLI now exposes independent switches (all default on). For example,
+this uses constant germination/competition and locally varying reproduction:
+
+```bash
+.venv/bin/python scripts/run_simulation.py --landscape data/raw/landscape8.npy --no-abiotic-germination --no-abiotic-competition --abiotic-reproduction --generations 100 --carrying-capacity 4 --snapshot community --output data/simulations/reproduction_only_new.npy
+```
+
+Use `--germination-optima`, `--competition-optima`, `--reproduction-optima` for
+species vectors, and corresponding `--*-widths` options for standard deviations
+(one shared value or one per species). For full, inspectable datasets run:
+
+```bash
+.venv/bin/python scripts/run_treatment_batch.py \
+  --germination-landscape data/raw/landscape8.npy \
+  --competition-landscape data/raw/landscape9.npy \
+  --reproduction-landscape data/raw/landscape10.npy \
+  --generations 100 --replicates 5 --seed 7 --carrying-capacity 4
+```
+
+For a shared G=C=R landscape, replace the three landscape options with
+`--landscape data/raw/landscape8.npy`. A stage-specific option can override just
+one stage. The batch always runs all eight control combinations, overriding any
+individual stage switches. It creates a unique timestamp/UUID directory under
+`data/treatment_batches/`; existing results are never overwritten.
+
+The demonstration uses the project's existing 100-generation setting and five
+replicates (no prior replicate count was configured). Seeds are 7–11 for each
+treatment. All other parameters are held fixed: capacity 4 (the latest requested
+setting), adjacent dispersal, staying probability 0.5, lifespan 4, h=1,
+fecundities [20,5,20,5], all competition coefficients 1, widths sqrt(2), and
+annual flags [true,false,true,false]. Stage default optima and baselines depend
+on their input landscapes but do not change between treatments.
+
+G=landscape8, C=landscape9, R=landscape10 are distinct stage inputs **within each
+run**. All five replicates reuse this one assignment; they are demographic seed
+replicates, not independent landscape replicates. Matching seeds across treatments
+do not guarantee matching random events once simulation trajectories diverge.
+
+Every run directory contains:
+
+- `inputs/community.npy`: the **only classifier input**, integer species counts
+  with axes `(species, row, column)`, after competition and before mortality.
+- `continuation.npz`: final post-mortality `adults` and dispersed `seeds`.
+- `metadata.json`: labels `flags_GCR` in germination/competition/reproduction
+  order, run/replicate/seed/generation identifiers, stage source paths and hashes,
+  resolved optima, widths, unweighted performance baselines, demographic parameters,
+  species ordering, annual flags, and code provenance.
+
+The batch-level `manifest.json` records planned and completed runs, assignment,
+NumPy version, seed policy, source file/array hashes, commit and dirty status.
+The exact simulation/runner source files are copied into `code/`, with SHA-256
+hashes. A manifest entry is added only after a run's files are saved. No abiotic
+arrays, performance maps, labels, or parameters are inserted into input channels.
+
+For future train/test splits, keep all runs sharing **any** source landscape hash
+in the same split, including reuse in different stages or filename aliases. This
+single-assignment demonstration cannot support a landscape-independent split;
+additional independent landscape sets are needed. Source hashes establish file
+and array identity, not whether different generated arrays share an upstream seed.
+
+Generate plots from saved results without rerunning any simulations:
+
+```bash
+.venv/bin/python visualizations/plot_treatment_batch.py \
+  data/treatment_batches/20260925T152420Z_a4dc5fdc \
+  --replicate 1 \
+  --output-directory data/treatment_batches/20260925T152420Z_a4dc5fdc/figures
+```
+
+For a new batch, substitute the directory printed by the runner. The plotter
+saves individual community point maps, separate species abundance panels, and
+an eight-treatment comparison for one replicate and assignment. Optional repeated
+`--run-id` arguments select individual runs; comparison requires all eight.
+Colors, axes, and abundance scales are shared across the selected runs. Every
+plant is drawn: within-cell offsets are deterministic display positions, not
+simulated subcell coordinates. Figures use the pre-mortality community and contain
+no abiotic landscapes. CLI batch/output paths for this plotter are relative to
+its working directory; run these commands from the project root.
