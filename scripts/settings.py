@@ -10,11 +10,14 @@ landscape_seed = 7
 
 # Simulation duration and randomness
 years = 200
-simulation_seed = 7
+simulation_seed = 9
 
 # Output files
-landscape_file = "data/landscapes/landscape_003.npz"
-simulation_file = "data/simulations/simulation_003.npz"
+germination_landscape_file = "data/landscapes/landscape_001.npz"
+competition_landscape_file = "data/landscapes/landscape_002.npz"
+reproduction_landscape_file = "data/landscapes/landscape_003.npz"
+
+simulation_file = "data/simulations/simulation_008.npz"
 
 # Species order: annual, perennial, annual, perennial
 number_of_species = 4
@@ -33,9 +36,9 @@ dispersal_type = "adjacent"  # "adjacent", "intermediate", "universal"
 seed_stay_probability = 0.5
 
 # Dependence on local abiotic conditions
-germination_uses_landscape = False
-competition_uses_landscape = False
-reproduction_uses_landscape = False
+germination_uses_landscape = True
+competition_uses_landscape = True
+reproduction_uses_landscape = True
 
 # Niche variance for each life stage
 germination_niche_variance = 2.0

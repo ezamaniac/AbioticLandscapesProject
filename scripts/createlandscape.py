@@ -1,6 +1,7 @@
 """Generate spatially autocorrelated landscapes with midpoint displacement."""
 
 from pathlib import Path
+import re
 
 import numpy as np
 
@@ -8,7 +9,7 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def resolve_output_directory(output_directory="data/raw"):
+def resolve_output_directory(output_directory="data/landscapes"):
     """Create an output directory, resolving relative paths from the project root."""
     directory = Path(output_directory).expanduser()
     if not directory.is_absolute():
@@ -23,12 +24,12 @@ def _add_noise(values, filled, scale, rng):
 
 
 def _next_landscape_number(output_directory):
-    """Continue numbering across NumPy files and existing landscape CSVs."""
-    numbers = [
-        int(path.stem[9:])
-        for path in Path(output_directory).glob("landscape*.*")
-        if path.suffix in {".npy", ".csv"} and path.stem[9:].isdigit()
-    ]
+    """Continue numbering across landscape archives and legacy NumPy/CSV files."""
+    numbers = []
+    for path in Path(output_directory).glob("landscape*.*"):
+        match = re.fullmatch(r"landscape_?(\d+)", path.stem)
+        if path.is_file() and path.suffix in {".npz", ".npy", ".csv"} and match:
+            numbers.append(int(match.group(1)))
     return max(numbers, default=0) + 1
 
 
@@ -106,6 +107,6 @@ if __name__ == "__main__":
     landscape = generate_landscape(seed=7)
     output_directory = resolve_output_directory()
     landscape_number = _next_landscape_number(output_directory)
-    output_path = output_directory / f"landscape{landscape_number}.npy"
-    np.save(output_path, landscape)
-    
+    output_path = output_directory / f"landscape_{landscape_number:03d}.npz"
+    np.savez_compressed(output_path, landscape=landscape)
+    print(f"Saved landscape to {output_path}")

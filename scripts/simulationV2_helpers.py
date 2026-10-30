@@ -24,6 +24,12 @@ Calculate the niche optima for a the given number of species
 @return: 1D array of niche optima for each species
 """
 
+def load_landscape(landscape_file):
+    with np.load(landscape_file, allow_pickle=False) as data:
+        landscape = data["landscape"].copy()
+
+    return landscape
+
 def calculate_niche_optima(landscape, number_of_species):
     minimum = landscape.min()
     maximum = landscape.max()
@@ -40,11 +46,40 @@ def calculate_niche_optima(landscape, number_of_species):
 
 
 
+# def calculate_performance(
+#     landscape,
+#     niche_optima,
+#     niche_variance,
+#     uses_landscape,
+# ):
+#     number_of_species = len(niche_optima)
+
+#     performance = np.zeros(
+#         (number_of_species, *landscape.shape),
+#         dtype=float,
+#     )
+
+#     for species in range(number_of_species):
+#         optimum = niche_optima[species]
+
+#         local_performance = np.exp(
+#             -(landscape - optimum) ** 2 / (2 * niche_variance)
+#         )
+
+#         if uses_landscape:
+#             performance[species] = local_performance
+#         else:
+#             baseline = local_performance.mean()
+#             performance[species] = baseline
+
+#     return performance
+
 def calculate_performance(
     landscape,
     niche_optima,
     niche_variance,
     uses_landscape,
+    normalize_habitat=False,
 ):
     number_of_species = len(niche_optima)
 
@@ -52,6 +87,25 @@ def calculate_performance(
         (number_of_species, *landscape.shape),
         dtype=float,
     )
+
+    # Split tied microsites equally between the closest species.
+    if not uses_landscape and normalize_habitat:
+        distances = np.array([
+            np.abs(landscape - optimum)
+            for optimum in niche_optima
+        ])
+
+        closest_species = np.isclose(
+            distances,
+            distances.min(axis=0),
+            rtol=0,
+            atol=1e-12,
+        )
+
+        habitat_shares = (
+            closest_species / closest_species.sum(axis=0)
+        )
+        habitat_fractions = habitat_shares.mean(axis=(1, 2))
 
     for species in range(number_of_species):
         optimum = niche_optima[species]
@@ -64,6 +118,17 @@ def calculate_performance(
             performance[species] = local_performance
         else:
             baseline = local_performance.mean()
+
+            if normalize_habitat:
+                habitat_fraction = habitat_fractions[species]
+
+                if habitat_fraction == 0:
+                    raise ValueError(
+                        f"Species {species + 1} has no preferred habitat."
+                    )
+
+                baseline = min(baseline / habitat_fraction, 1.0)
+
             performance[species] = baseline
 
     return performance

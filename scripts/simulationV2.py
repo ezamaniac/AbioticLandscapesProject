@@ -3,10 +3,10 @@ from pathlib import Path
 import numpy as np
 
 import settings
-from createlandscape import generate_landscape
 from simulationV2_helpers import (
     calculate_niche_optima,
     calculate_performance,
+    load_landscape,
     place_initial_plants,
     compete,
     reproduce,
@@ -20,26 +20,16 @@ from simulationV2_helpers import (
 def main():
     random_generator = np.random.default_rng(settings.simulation_seed)
 
-    # Create and save the landscape.
-    landscape = generate_landscape(
-        dimension=settings.landscape_size,
-        fractal_dimension=settings.fractal_dimension,
-        standard_deviation=settings.landscape_standard_deviation,
-        seed=settings.landscape_seed,
+    # Using a variety of landscapes for this version.
+    germination_landscape = load_landscape(
+    settings.germination_landscape_file
     )
-
-    Path(settings.landscape_file).parent.mkdir(
-        parents=True, exist_ok=True
+    competition_landscape = load_landscape(
+    settings.competition_landscape_file
     )
-    np.savez_compressed(
-        settings.landscape_file,
-        landscape=landscape,
+    reproduction_landscape = load_landscape(
+    settings.reproduction_landscape_file
     )
-
-    # All stages use the same landscape for this first version.
-    germination_landscape = landscape
-    competition_landscape = landscape
-    reproduction_landscape = landscape
 
     germination_optima = calculate_niche_optima(
         germination_landscape, settings.number_of_species
@@ -57,12 +47,14 @@ def main():
         germination_optima,
         settings.germination_niche_variance,
         settings.germination_uses_landscape,
+        normalize_habitat=True
     )
     competition_performance = calculate_performance(
         competition_landscape,
         competition_optima,
         settings.competition_niche_variance,
         settings.competition_uses_landscape,
+        normalize_habitat=True
     )
     reproduction_performance = calculate_performance(
         reproduction_landscape,
@@ -159,9 +151,9 @@ def main():
         settings.reproduction_uses_landscape,
     ])
     landscape_files = np.array([
-        settings.landscape_file,
-        settings.landscape_file,
-        settings.landscape_file,
+        settings.germination_landscape_file,
+        settings.competition_landscape_file,
+        settings.reproduction_landscape_file,
     ])
 
     Path(settings.simulation_file).parent.mkdir(
